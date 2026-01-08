@@ -72,3 +72,16 @@ dist/
 
 # Python version manager
 .python-version
+
+# Azure and deployment
+azure-credentials.json
+*.secret
+*.key
+*.pem
+credentials*.json
+
+# Exercise results
+resultat.txt
+
+# Coverage reports
+coverage.xml

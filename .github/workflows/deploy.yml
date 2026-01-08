@@ -1,0 +1,254 @@
+name: CI/CD - Build and Deploy to Azure
+
+# Trigger only on tagged releases (e.g., v1.0.0, v1.0.1)
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  IMAGE_NAME: bank-churn-api
+  CONTAINER_APP_NAME: bank-churn-api
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Train model (if not exists)
+        run: |
+          if [ ! -f "model/churn_model.pkl" ]; then
+            echo "📦 Training model..."
+            python train_model.py
+          else
+            echo "✓ Model already exists"
+          fi
+      
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ --cov=app --cov-report=term-missing --cov-report=xml -v
+      
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        if: always()
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  build-and-push:
+    name: Build and Push Docker Image
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Extract version from tag
+        id: version
+        run: |
+          # Extract version from tag (e.g., v1.0.0 -> 1.0.0)
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Version: $VERSION"
+      
+      - name: Train model (if not exists)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          if [ ! -f "model/churn_model.pkl" ]; then
+            echo "📦 Training model for Docker image..."
+            python train_model.py
+          else
+            echo "✓ Model already exists"
+          fi
+      
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Login to Azure Container Registry
+        run: |
+          echo "${{ secrets.ACR_PASSWORD }}" | docker login ${{ secrets.ACR_LOGIN_SERVER }} \
+            --username ${{ secrets.ACR_USERNAME }} \
+            --password-stdin
+      
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+            --tag ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest \
+            .
+      
+      - name: Push Docker image
+        run: |
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+      
+      - name: Save image metadata
+        id: meta
+        run: |
+          echo "tags=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Deploy to Azure Container Apps
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Deploy to Azure Container Apps
+        run: |
+          az containerapp update \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+            --set-env-vars \
+              MODEL_PATH=/app/model/churn_model.pkl \
+              PYTHONUNBUFFERED=1 \
+              APP_VERSION=${{ steps.version.outputs.version }}
+      
+      - name: Wait for deployment
+        run: |
+          echo "⏳ Waiting 30 seconds for deployment to stabilize..."
+          sleep 30
+      
+      - name: Get Container App URL
+        id: app_url
+        run: |
+          FQDN=$(az containerapp show \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --query properties.configuration.ingress.fqdn \
+            --output tsv | tr -d '\r')
+          
+          echo "url=https://$FQDN" >> $GITHUB_OUTPUT
+          echo "🌐 Application URL: https://$FQDN"
+      
+      - name: Test deployment (Health Check)
+        run: |
+          URL="${{ steps.app_url.outputs.url }}"
+          echo "🔍 Testing health endpoint: $URL/health"
+          
+          for i in {1..10}; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health" || echo "000")
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✓ Health check passed (HTTP $HTTP_CODE)"
+              curl -s "$URL/health" | jq '.'
+              exit 0
+            else
+              echo "⏳ Attempt $i/10: HTTP $HTTP_CODE - Waiting 10s..."
+              sleep 10
+            fi
+          done
+          
+          echo "❌ Health check failed after 10 attempts"
+          exit 1
+      
+      - name: Test prediction endpoint
+        run: |
+          URL="${{ steps.app_url.outputs.url }}"
+          echo "🔍 Testing prediction endpoint: $URL/predict"
+          
+          curl -X POST "$URL/predict" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "CreditScore": 650,
+              "Age": 35,
+              "Tenure": 5,
+              "Balance": 80000.0,
+              "NumOfProducts": 2,
+              "HasCrCard": 1,
+              "IsActiveMember": 1,
+              "EstimatedSalary": 75000.0,
+              "Geography_Germany": 0,
+              "Geography_Spain": 0
+            }' | jq '.'
+      
+      - name: Deployment summary
+        run: |
+          echo "=========================================="
+          echo "✓ Deployment Successful!"
+          echo "=========================================="
+          echo "Version: ${{ steps.version.outputs.version }}"
+          echo "Image: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
+          echo "URL: ${{ steps.app_url.outputs.url }}"
+          echo ""
+          echo "📋 Next steps:"
+          echo "1. Visit ${{ steps.app_url.outputs.url }}/docs for API documentation"
+          echo "2. Monitor logs in Azure Portal → Container Apps → Log stream"
+          echo "3. Test with: curl ${{ steps.app_url.outputs.url }}/health"
+          echo "=========================================="
+      
+      - name: Create deployment comment
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const url = '${{ steps.app_url.outputs.url }}';
+            const version = '${{ steps.version.outputs.version }}';
+            
+            const body = `## 🚀 Deployment Summary
+            
+            **Tag:** \`${tag}\`
+            **Version:** \`${version}\`
+            **Status:** ✅ Deployed
+            
+            ### 🔗 Links
+            - **API:** ${url}
+            - **Docs:** ${url}/docs
+            - **Health:** ${url}/health
+            
+            ### 🧪 Quick Test
+            \`\`\`bash
+            curl ${url}/health
+            \`\`\`
+            `;
+            
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: body
+            });
