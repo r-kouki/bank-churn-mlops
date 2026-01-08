@@ -51,6 +51,7 @@ jobs:
       
       - name: Run tests with coverage
         run: |
+          export PYTHONPATH="${PYTHONPATH}:${PWD}"
           pytest tests/ --cov=app --cov-report=term-missing --cov-report=xml -v
       
       - name: Upload coverage reports
