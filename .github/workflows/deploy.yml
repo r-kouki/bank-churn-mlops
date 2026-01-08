@@ -143,14 +143,49 @@ jobs:
       
       - name: Deploy to Azure Container Apps
         run: |
-          az containerapp update \
+          # Check if container app exists
+          if az containerapp show \
             --name ${{ env.CONTAINER_APP_NAME }} \
-            --resource-group ${{ secrets.RESOURCE_GROUP }} \
-            --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
-            --set-env-vars \
-              MODEL_PATH=/app/model/churn_model.pkl \
-              PYTHONUNBUFFERED=1 \
-              APP_VERSION=${{ steps.version.outputs.version }}
+            --resource-group ${{ secrets.RESOURCE_GROUP }} &>/dev/null; then
+            
+            echo "📦 Updating existing container app..."
+            az containerapp update \
+              --name ${{ env.CONTAINER_APP_NAME }} \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+              --set-env-vars \
+                MODEL_PATH=/app/model/churn_model.pkl \
+                PYTHONUNBUFFERED=1 \
+                APP_VERSION=${{ steps.version.outputs.version }}
+          else
+            echo "🆕 Creating new container app..."
+            
+            # Get Container Apps Environment
+            ENV_NAME=$(az containerapp env list \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --query "[0].name" -o tsv | tr -d '\r')
+            
+            echo "Using environment: $ENV_NAME"
+            
+            az containerapp create \
+              --name ${{ env.CONTAINER_APP_NAME }} \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --environment $ENV_NAME \
+              --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+              --registry-server ${{ secrets.ACR_LOGIN_SERVER }} \
+              --registry-username ${{ secrets.ACR_USERNAME }} \
+              --registry-password ${{ secrets.ACR_PASSWORD }} \
+              --target-port 8000 \
+              --ingress external \
+              --cpu 0.5 \
+              --memory 1Gi \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --env-vars \
+                MODEL_PATH=/app/model/churn_model.pkl \
+                PYTHONUNBUFFERED=1 \
+                APP_VERSION=${{ steps.version.outputs.version }}
+          fi
       
       - name: Wait for deployment
         run: |
@@ -224,36 +259,3 @@ jobs:
           echo "2. Monitor logs in Azure Portal → Container Apps → Log stream"
           echo "3. Test with: curl ${{ steps.app_url.outputs.url }}/health"
           echo "=========================================="
-      
-      - name: Create deployment comment
-        uses: actions/github-script@v7
-        if: always()
-        with:
-          script: |
-            const tag = context.ref.replace('refs/tags/', '');
-            const url = '${{ steps.app_url.outputs.url }}';
-            const version = '${{ steps.version.outputs.version }}';
-            
-            const body = `## 🚀 Deployment Summary
-            
-            **Tag:** \`${tag}\`
-            **Version:** \`${version}\`
-            **Status:** ✅ Deployed
-            
-            ### 🔗 Links
-            - **API:** ${url}
-            - **Docs:** ${url}/docs
-            - **Health:** ${url}/health
-            
-            ### 🧪 Quick Test
-            \`\`\`bash
-            curl ${url}/health
-            \`\`\`
-            `;
-            
-            github.rest.repos.createCommitComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              commit_sha: context.sha,
-              body: body
-            });
