@@ -38,9 +38,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Train model (if not exists)
+      - name: Generate data and train model
         run: |
           if [ ! -f "model/churn_model.pkl" ]; then
+            echo "📊 Generating data..."
+            python generate_data.py
             echo "📦 Training model..."
             python train_model.py
           else
@@ -77,11 +79,13 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "📦 Version: $VERSION"
       
-      - name: Train model (if not exists)
+      - name: Generate data and train model
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           if [ ! -f "model/churn_model.pkl" ]; then
+            echo "📊 Generating data..."
+            python generate_data.py
             echo "📦 Training model for Docker image..."
             python train_model.py
           else
