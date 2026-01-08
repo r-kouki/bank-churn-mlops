@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+deployed/
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# MLflow
+mlruns/
+mlflow_ui.log
+
+# Model artifacts (typically not committed, regenerate from training)
+model/*.pkl
+model/*.joblib
+model/*.h5
+model/*.pt
+model/*.pth
+
+# Data files (large datasets)
+data/*.csv
+data/*.parquet
+data/*.json
+!data/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Matplotlib config
+.mplconfig/
+
+# Generated plots/images (regenerate from code)
+*.png
+*.jpg
+*.jpeg
+!docs/*.png
+!docs/*.jpg
+
+# Environment variables
+.env
+.env.local
+
+# Python version manager
+.python-version
